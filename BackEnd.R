@@ -7,31 +7,44 @@ seed4<-42
 # ++++++++++++++++
 # DataFrame1: a data frame I'm sorting the data into
 # DataFrame2: the data frame made from the excel sheet
-# DataFrame3: the column from my excel sheet with the patient IDs in it
-PatientIDSort<-function(DataFrame1,DataFrame2,DataFrame3){
+PatientIDSort<-function(DataFrame1,DataFrame2){
   for (i in 1:109){
-    for (j in 1:length(DataFrame3)){
-      if (DataFrame3[j]==i){DataFrame1[i]=DataFrame2[j]}  
+    for (j in 1:101){
+      #FIXME: this should be one of the input dataframes
+      if (PlasmaData[j,1]==i){DataFrame1[i]=DataFrame2[j]}  
       #Puts data into the row number corresponding to the ID number, 
       #i.e. patient 1 in row 1, etc.
     }}
   return(DataFrame1)}
 
 
-# +++++++++++++++++
-# OneHotVariableRename
-# +++++++++++++++++
-# DataFrame1: a data frame I'm pulling data from
-# DataFrame2: a data frame I'm putting data into
-OneHotVariableRename<-function(DataFrame1,DataFrame2){
-  DataFrame2[,1]<-ifelse(DataFrame1=="Indeterminate",1,0)#indeterminate variable
-  DataFrame2[,2]<-ifelse(DataFrame1=="Positive",1,0)#fix positive variable
-  DataFrame2[,3]<-ifelse(DataFrame1=="Negative",1,0)#fix negative variable
-  stopifnot(is.na(DataFrame2[,1])==is.na(DataFrame1))
-  stopifnot(is.na(DataFrame2[,2])==is.na(DataFrame1))
-  stopifnot(is.na(DataFrame2[,3])==is.na(DataFrame1))
-  return(DataFrame2)
+extract.rankings <- function(object) {
+  losttheplot = ggplot_build(object);
+  xlabels = losttheplot$layout$panel_params[[1]]$x$get_labels()
+  xlabels
 }
+
+#Average predictions from both holdoutRF forests for test-set evaluation.
+predict.holdoutRF <- function(object, data = NULL, ...) {
+  pred1 <- predict(object$rf1, data, ...)
+  pred2 <- predict(object$rf2, data, ...)
+  if (is.factor(pred1$predictions)) {
+    levels <- levels(pred1$predictions)
+    avg <- round((as.integer(pred1$predictions) + as.integer(pred2$predictions)) / 2)
+    pred1$predictions <- factor(levels[avg], levels = levels)
+  } else if (is.matrix(pred1$predictions)) {
+    pred1$predictions <- (pred1$predictions + pred2$predictions) / 2
+  } else {
+    avg <- (pred1$predictions + pred2$predictions) / 2
+    if (identical(object$treetype, "Classification")) {
+      avg <- round(avg)
+    }
+    pred1$predictions <- avg
+  }
+  pred1
+}
+
+#Load functions
 
 # #############
 # MyCts
@@ -58,7 +71,13 @@ MyCts<-function(IndepMatrix,DepVector){
   colnames(DepTest)<-"DepTest"
   
   
-  #Leave one out cross validation (LOOCV)
+  #5-fold cross-validation
+  set.seed(seed4)
+  cvindex=sample(rep(seq(5),length=nrow(TrainData)))#Make an index for the 5-fold
+  #cross-validation
+  CVTrain<-cbind(TrainData,cvindex)#attach index to matrix of predictors
+  CVDep<-cbind(mydepvector,cvindex)#attach index to dependent variable
+  CVDep<-as.data.frame(CVDep)
   DataFrame<-list()#initialize outputs
   Vector<-list()#initialize outputs
   my.seq<-seq(0,1,0.1)#sequence of alphas to grid search
@@ -72,22 +91,26 @@ MyCts<-function(IndepMatrix,DepVector){
   my.length<-length(my.seq3)#total length needed for other outputs
   RMSERF<-matrix(nrow=my.length,ncol=length(my.seq4))#intitialize outputs
   SDRF<-matrix(nrow=my.length,ncol=length(my.seq4))
+  RMSERFHO<-matrix(nrow=my.length,ncol=length(my.seq4))#intitialize outputs
+  SDRFHO<-matrix(nrow=my.length,ncol=length(my.seq4))
   my.n<-matrix(nrow = my.length,ncol = length(my.seq4))
   my.depth<-matrix(nrow = my.length,ncol = length(my.seq4))
   my.object<-list()
   forests<-list()
   for (j in 1:length(my.seq)){#for each value of alpha in the grid
     for (n in 1:length(my.seq2)){#for each value of lambda in the grid
-      myvector<-matrix(nrow=nrow(TrainData),ncol=1)
-      for (i in 1:nrow(TrainData)){#for each holdout set
-        DataFrame[[i]]<-TrainData[-i,]#sort the predictors into train
-        Vector[[i]]<-mydepvector[-i]#sort the output into train
-        TestData1<-as.matrix(TrainData[i,])#sort the predictors into test
-        DepTest1<-as.data.frame(mydepvector[i])#sort the output into test
+      myvector<-matrix(nrow=5,ncol=1)
+      for (i in 1:5){#for each holdout set
+        DataFrame[[i]]<-CVTrain[CVTrain$cvindex!=i,]#sort the predictors into train
+        Vector[[i]]<-CVDep[CVDep$cvindex!=i,1]#sort the output into train
+        TestData1<-CVTrain[CVTrain$cvindex==i,]#sort the predictors into test
+        TestData1<-as.matrix(TestData1)
+        DepTest1<-CVDep[CVDep$cvindex==i,1]#sort the output into test
+        DepTest1<-as.data.frame(DepTest1)
         set.seed(seed2)
         foldid=sample(rep(seq(10),length=nrow(DataFrame[[i]])))#hold foldid constant
         #by setting the seed at the same number before doing this each time
-        k<-i+(j-1)*(n-1)*nrow(TrainData)#count total number of loops to index
+        k<-i+(j-1)*(n-1)*5#count total number of loops to index
         my.object[[k]]<-glmnet(DataFrame[[i]],Vector[[i]],
                                foldid=foldid,alpha=my.seq[j],family = "gaussian",
                                lambda=my.seq2[n])#Builds a glmnet object
@@ -112,31 +135,44 @@ MyCts<-function(IndepMatrix,DepVector){
     }}
   for (j in 1:length(my.seq3)){#for each possible number of trees
     for (n in 1:length(my.seq4)){#for each possible tree depth
-      myvector2<-matrix(nrow=nrow(TrainData),ncol=1)#initialize temporary variable
-      for (i in 1:nrow(TrainData)){#for each of the holdout sets
-        DataFrame[[i]]<-TrainData[-i,]#sort the predictors into train
-        Vector[[i]]<-mydepvector[-i]#sort the output into train
-        TestData1<-as.matrix(TrainData[i,])#sort the predictors into test
-        DepTest1<-as.data.frame(mydepvector[i])#sort the output into test
+      myvector2<-matrix(nrow=5,ncol=1)#initialize temporary variable
+      myvector2HO<-matrix(nrow=5,ncol=1)#initialize temporary variable
+      for (i in 1:5){#for each of the holdout sets
+        DataFrame[[i]]<-CVTrain[CVTrain$cvindex!=i,]#sort the predictors into train
+        Vector[[i]]<-CVDep[CVDep$cvindex!=i,1]#sort the output into train
+        TestData1<-CVTrain[CVTrain$cvindex==i,]#sort the predictors into test
+        TestData1<-as.matrix(TestData1)
+        DepTest1<-CVDep[CVDep$cvindex==i,1]#sort the output into test
+        DepTest1<-as.data.frame(DepTest1)
         
         rf<-ranger(Vector[[i]]~.,data=DataFrame[[i]],#build a random forest with
                    #train predictor, train output
                    num.trees = my.seq3[j],#given number of trees
                    replace = TRUE,#sample with replacement
-                   importance="sobolMDA",#Sobol MDA importance measure
+                   importance="permutation",#Sobol MDA importance measure
                    min.node.size = my.seq4[n],#given min node size
                    keep.inbag = TRUE)#save so that we can use later
-        predicted<-predict(rf,TestData1)#predict using the random forest and test
+        
+        RFTrainData<-DataFrame[[i]]
+        RFTrainData$DepVar<-Vector[[i]]
+        rfHO<-holdoutRF(DepVar~.,data=RFTrainData,num.trees = my.seq3[j],
+                        #build a random forest using all train data, with chosen
+                        min.node.size = my.seq4[n],
+                        keep.inbag = TRUE)
+        predicted<-predict(rf,TestData1)#predict using the random forest and test]
         #predictors
         predicted<-as.data.frame(predicted)
         myvector2[i]<-sqrt(1/nrow(DepTest1)*sum((predicted-DepTest1)^2)) #calculate metric of fit
+        predictedHO<-as.data.frame(predict(rfHO,TestData1))
+        myvector2HO[i]<-sqrt(1/nrow(DepTest1)*sum((predictedHO-DepTest1)^2)) #calculate metric of fit
         
       }
       my.n[j,n]<-my.seq3[j]#save number of trees with same index as measure of fit
       RMSERF[j,n]=mean(myvector2)#average over the holdout sets
       SDRF[j,n]=sd(myvector2)
       my.depth[j,n]<-my.seq4[n]
-      
+      RMSERFHO[j,n]=mean(myvector2HO)#average over the holdout sets
+      SDRFHO[j,n]=sd(myvector2HO)
     }
   }
   my.alpha<-c(my.alpha)#transform matrices into vectors
@@ -182,27 +218,27 @@ MyCts<-function(IndepMatrix,DepVector){
   my.coefs<-as.data.frame(as.matrix(my.coefs))
   
   my.coefs<-my.coefs %>%#arranges the coefficients in descending absolute value
-    arrange(desc(abs(my.coefs$s1)))
+    arrange(desc(abs(my.coefs$`s=lambda.min`)))
   my.coefs<-my.coefs[!rownames(my.coefs) %in% "(Intercept)",,drop=FALSE]#gets rid of intercept
   my.coefs<-my.coefs[1:15,,drop=FALSE]#selects top 15 most important coefficients
   my.coefs<-my.coefs %>%#Gets rid of all coefficients that are zero
-    filter(!s1==0)
+    filter(!`s=lambda.min`==0)
   my.coefs<-as.data.frame(my.coefs)
   my.coefs<-my.coefs %>%#arranges the coefficients in descinding absolute value
-    arrange(desc(abs(my.coefs$s1)))#have to do this again because they get rearanged by intermediate steps
+    arrange(desc(abs(my.coefs$`s=lambda.min`)))#have to do this again because they get rearanged by intermediate steps
   my.coefs<-rownames_to_column(my.coefs)#make a column and put the rownames there
   #note: rownames are the variable names
   my.coefs$rowname<-factor(my.coefs$rowname,levels = unique(my.coefs$rowname))
   #set rownames as factor so that they won't automatically graph in alphabetical order
   
-  p1<-ggplot(my.coefs,aes(x=rowname,y=s1))+#plot the remaining coefficients in
+  p1<-ggplot(my.coefs,aes(x=rowname,y=`s=lambda.min`))+#plot the remaining coefficients in
     #order of descending magnitude with variable name as x-asis label
     geom_point(colour="#3c78d8",size=6)+#stick to theme colors and make dot big
     labs(x="Variable",y="Coefficient")+#label the axes
     theme_bw()+#get rid of grey
     theme(axis.text.x = element_text(angle=90),#turn the variable names vertical
           axis.title.x=element_blank(),#get rid of x axis title
-          text=element_text(face="bold",color="black",size=rel(5)),#make font bold, large
+          text=element_text(face="bold",color="black",size=rel(3)),#make font bold, large
           axis.text = element_text(color = "black"))#specify text color for axes
   
   
@@ -220,25 +256,48 @@ MyCts<-function(IndepMatrix,DepVector){
     arrange(RMSERF)#arrange in ascending order to minimize
   my.indices<-RMSERF$rowname[1:5]
   
+  RMSERFHO<-c(RMSERFHO)#make matrices into vectors
+  SDRFHO<-c(SDRFHO)
+  RMSERFHO<-as.data.frame(RMSERFHO)
+  dfRMSERFHO<-cbind(RMSERFHO,my.n,my.depth)
+  
+  RMSERFHO<-rownames_to_column(RMSERFHO)
+  RMSERFHO<- RMSERFHO %>%
+    arrange(RMSERFHO)#arrange in ascending order to minimize
+  my.indicesHO<-RMSERFHO$rowname[1:5]  
   
   my.number<-my.n[as.numeric(my.indices)]#determine which number of trees optimizes metric
   my.optimal.depth<-my.depth[as.numeric(my.indices)]#determine which tree depth optimizes metric
   RMSEtest<-matrix(nrow = length(my.number),ncol = 1)#initialize outputs
+  
+  my.numberHO<-my.n[as.numeric(my.indicesHO)]#determine which number of trees optimizes metric
+  my.optimal.depthHO<-my.depth[as.numeric(my.indicesHO)]#determine which tree depth optimizes metric
+  RMSEHOtest<-matrix(nrow = length(my.numberHO),ncol = 1)#initialize outputs
   rf.regression<-list()
-  for (i in 1:length(my.number)){#for each optimal number of trees with tree depth combo
+  rf.regressionHO<-list()
+  for (i in 1:length(my.numberHO)){#for each optimal number of trees with tree depth combo
     TrainData<-as.data.frame(TrainData)
     rf.regression[[i]]<-ranger(mydepvector~.,data=TrainData,num.trees = my.number[i],
                                #build a random forest using all train data, with chosen
                                replace = TRUE,#number of trees, keeping other parameters
-                               importance="sobolMDA",#the same as in the loop
+                               importance="permutation",#the same as in the loop
                                min.node.size = my.optimal.depth[i],
                                keep.inbag = TRUE)
+    TrainRF<-TrainData
+    TrainRF$DepVar<-mydepvector
+    rf.regressionHO[[i]]<-holdoutRF(DepVar~.,data=TrainRF,num.trees = my.numberHO[i],
+                                    #build a random forest using all train data, with chosen
+                                    min.node.size = my.optimal.depthHO[i],
+                                    keep.inbag = TRUE)
     
     predicted<-predict(rf.regression[[i]],TestData)#predict using this random forest
+    predictedHO<-predict(rf.regressionHO[[i]],TestData)#predict using this random forest
     #and test predictors
     predicted<-as.data.frame(predicted)
     DepTest<-as.data.frame(DepTest)
     RMSEtest[i]<-sqrt((1/nrow(predicted))*sum((DepTest-predicted)^2))#evaluate using the same metric
+    predictedHO<-as.data.frame(predictedHO)
+    RMSEHOtest[i]<-sqrt((1/nrow(predictedHO))*sum((DepTest-predictedHO)^2))#evaluate using the same metric
   }
   
   ImportanceMeasure<-rf.regression[[1]][["variable.importance"]]#extract variable importance scores
@@ -250,18 +309,36 @@ MyCts<-function(IndepMatrix,DepVector){
   ImportanceMeasure<-as.data.frame(ImportanceMeasure)
   ImportanceMeasure$rowname<-factor(ImportanceMeasure$rowname,
                                     levels=unique(ImportanceMeasure$rowname))
+  ImportanceMeasureHO<-rf.regressionHO[[1]][["variable.importance"]]#extract variable importance scores
+  ImportanceMeasureHO<-as.data.frame(ImportanceMeasureHO)
+  ImportanceMeasureHO<-ImportanceMeasureHO %>%#arrange variable importance scores in
+    arrange(desc(as.numeric(ImportanceMeasureHO)))#descending value (all are positive, so no abs needed)
+  ImportanceMeasureHO<-rownames_to_column(ImportanceMeasureHO)#make variable names a column
+  ImportanceMeasureHO<-ImportanceMeasureHO[1:15,]#only keep the top 15 most important factors
+  ImportanceMeasureHO<-as.data.frame(ImportanceMeasureHO)
+  ImportanceMeasureHO$rowname<-factor(ImportanceMeasureHO$rowname,
+                                      levels=unique(ImportanceMeasureHO$rowname))
   #make variable names a factor so they won't automatically be alphabetized when plotted
   p2<-ggplot(data = ImportanceMeasure,mapping = aes(x=rowname,#plot importance measures
                                                     y=ImportanceMeasure))+
     geom_point(size=6,fill="#de7608",color="#de7608")+#use color pallet
     expand_limits(y=0)+#force y-axis to include zero rather than starting at nonzero value
-    labs(x="Variable",y="Importance Index")+#label axes
+    labs(x="Variable",y="permutation")+#label axes
     theme_bw()+#get rid of grey background
     theme(axis.text.x = element_text(angle=90),#rotate variable names to vertical
           axis.title.x=element_blank(),#get rid of x-axis title
-          text=element_text(face="bold",color="black",size=rel(5)),#make text black and big
+          text=element_text(face="bold",color="black",size=rel(3)),#make text black and big
           axis.text = element_text(color = "black"))#make text black
-  
+  p2HO<-ggplot(data = ImportanceMeasureHO,mapping = aes(x=rowname,#plot importance measures
+                                                        y=ImportanceMeasureHO))+
+    geom_point(size=6,fill="#de7608",color="#de7608")+#use color pallet
+    expand_limits(y=0)+#force y-axis to include zero rather than starting at nonzero value
+    labs(x="Variable",y="ranger Holdout")+#label axes
+    theme_bw()+#get rid of grey background
+    theme(axis.text.x = element_text(angle=90),#rotate variable names to vertical
+          axis.title.x=element_blank(),#get rid of x-axis title
+          text=element_text(face="bold",color="black",size=rel(3)),#make text black and big
+          axis.text = element_text(color = "black"))#make text black
   
   p3<-ggplot(data=dfRMSE,aes(x=my.alpha,y=log(my.lambda),fill=value))+
     geom_tile()+
@@ -282,7 +359,7 @@ MyCts<-function(IndepMatrix,DepVector){
   end.time<-Sys.time()#notes the end time
   time.taken<-round(end.time-start.time,2)#calculates the time taken to 2 decimals
   MyList<-list(my.model[[1]],RMSE1,Metrics,p1,rf.regression[[1]],RMSEtest,p2,time.taken,
-               p3,p4,my.best.alpha,my.best.lambda)
+               p3,p4,my.best.alpha,my.best.lambda,p2HO)
   #things I want to return from this function
   return(MyList)
 }
@@ -300,7 +377,6 @@ MyMult<-function(IndepMatrix,DepVector){
   DepVector<-as.data.frame(DepVector)
   Data.matrix<-makeX(IndepMatrix,na.impute=TRUE) #imputes NAs and returns a matrix
   
-  
   #Split into train and test sets
   Data.matrix<-as.data.frame(Data.matrix)#reformat into dataframe
   train<-sample(1:nrow(Data.matrix),nrow(Data.matrix)*0.7)#70/30 split
@@ -312,7 +388,12 @@ MyMult<-function(IndepMatrix,DepVector){
   DepTest<-as.data.frame(DepTest)
   colnames(DepTest)<-"DepTest"
   
-  #LOOCV
+  #5-fold cross-validation
+  set.seed(seed4)
+  cvindex=sample(rep(seq(5),length=length(mydepvector)))#make an index for 5-fold cross validation
+  CVTrain<-cbind(TrainData,cvindex)#attach index to data frame of predictors
+  CVDep<-cbind(mydepvector,cvindex)#attach index to vector of outputs
+  CVDep<-as.data.frame(CVDep)
   DataFrame<-list()#initialize outputs
   Vector<-list()
   my.seq3<-seq(50,1000,50)#sequence of numbers of trees to try
@@ -320,6 +401,8 @@ MyMult<-function(IndepMatrix,DepVector){
   my.length<-length(my.seq3)#total number of iterations in the loop
   RMSERF<-matrix(nrow=my.length,ncol=length(my.seq4))#initialize outputs
   SDRF<-matrix(nrow=my.length,ncol=length(my.seq4))
+  RMSERFHO<-matrix(nrow=my.length,ncol=length(my.seq4))#initialize outputs
+  SDRFHO<-matrix(nrow=my.length,ncol=length(my.seq4))
   my.n<-matrix(nrow=my.length,ncol=length(my.seq4))
   my.depth<-matrix(nrow=my.length,ncol=length(my.seq4))
   my.object<-list()
@@ -327,28 +410,46 @@ MyMult<-function(IndepMatrix,DepVector){
   
   for (j in 1:length(my.seq3)){#for each possible number of trees
     for (n in 1:length(my.seq4)){#for each possible tree depth
-      myvector2<-matrix(nrow = nrow(TrainData),ncol = 1)#temporary object to store metric in before averaging
-      for (i in 1:nrow(TrainData)){#for each of the holdout sets
-        DataFrame[[i]]<-TrainData[-i,]#Make training data frame of predictors
-        Vector[[i]]<-mydepvector[-i]#make training vector of outcome
-        TestData1<-as.matrix(TrainData[i,])#make test data frame of predictors
-        DepTest1<-as.data.frame(mydepvector[i])#make test data frame of outcome
+      myvector2<-matrix(nrow = 5,ncol = 1)#temporary object to store metric in before averaging
+      myvector2HO<-matrix(nrow = 5,ncol = 1)#temporary object to store metric in before averaging
+      for (i in 1:5){#for each of the holdout sets
+        
+        DataFrame[[i]]<-CVTrain[CVTrain$cvindex!=i,]#Make training data frame of predictors
+        Vector[[i]]<-CVDep[CVDep$cvindex!=i,1]#make training vector of outcome
+        TestData1<-CVTrain[CVTrain$cvindex==i,]#make test data frame of predictors
+        TestData1<-as.matrix(TestData1)
+        DepTest1<-CVDep[CVDep$cvindex==i,1]#make test data frame of outcome
+        DepTest1<-as.data.frame(DepTest1)
         rf<-ranger(Vector[[i]]~.,data=DataFrame[[i]],#builds a random forest using
                    #training predictors and outcome
                    num.trees = my.seq3[j],#loop through number of trees options
                    replace = TRUE,#keep other settings the same as in other functions MyBin and MyCts
-                   importance="sobolMDA",
+                   importance="permutation",
                    min.node.size = my.seq4[n],
                    keep.inbag = TRUE)
         predicted<-predict(rf,TestData1)#predict using the random forest we just built
         #and the test predictors
-        predicted<-as.data.frame(predicted)
-        myvector2[i]<-sqrt((1/nrow(predicted))*sum((DepTest1-predicted)^2))#measure outcome using chosen metric
+        #predicted<-as.data.frame(predicted)
+        myvector2[i]<-sqrt((1/length(predicted[[1]]))*sum((DepTest1-predicted[[1]])^2))#measure outcome using chosen metric
+        
+        RFTrainData<-DataFrame[[i]]
+        RFTrainData$DepVar<-Vector[[i]]
+        rfHO<-holdoutRF(DepVar~.,data=RFTrainData,num.trees = my.seq3[j],
+                        #build a random forest using all train data, with chosen
+                        min.node.size = my.seq4[n],
+                        keep.inbag = TRUE)    
+        predictedHO<-predict.holdoutRF(rfHO,TestData1)#predict using the random forest we just built
+        #and the test predictors
+        #predictedHO<-as.data.frame(predictedHO)
+        myvector2HO[i]<-sqrt((1/length(predictedHO[[1]]))*sum((DepTest1-predictedHO[[1]])^2))#measure outcome using chosen metric
+        
       }
       RMSERF[j,n]<-mean(myvector2)
       SDRF[j,n]<-sd(myvector2)
       my.n[j,n]<-my.seq3[j]#save number of trees with same index as metric
       my.depth[j,n]<-my.seq4[n]#save tree depth with same index too
+      RMSERFHO[j,n]<-mean(myvector2HO)
+      SDRFHO[j,n]<-sd(myvector2HO)
     }
   }
   
@@ -366,23 +467,47 @@ MyMult<-function(IndepMatrix,DepVector){
   my.number<-my.n[as.numeric(my.indices)]#determine which number of trees optimizes metric
   my.optimal.depth<-my.depth[as.numeric(my.indices)]#determine which tree depth optimizes metric
   RMSEtest<-matrix(nrow = length(my.number),ncol = 1)
-  rf<-list()
+  
+  RMSERFHO<-c(RMSERFHO)#transform each output matrix into a vector
+  SDRFHO<-c(SDRFHO)
+  RMSERFHO<-as.data.frame(RMSERFHO)
+  dfRMSERF<-cbind(RMSERFHO,my.n,my.depth)
+  RMSERFHO<-rownames_to_column(RMSERFHO)
+  RMSERFHO<- RMSERFHO %>%
+    arrange(RMSERFHO)#arrange in ascending order to minimize
+  my.indicesHO<-RMSERFHO$rowname[1:5]
+  
+  my.numberHO<-my.n[as.numeric(my.indicesHO)]#determine which number of trees optimizes metric
+  my.optimal.depthHO<-my.depth[as.numeric(my.indicesHO)]#determine which tree depth optimizes metric
+  RMSEtestHO<-matrix(nrow = length(my.numberHO),ncol = 1) 
+  
   for (i in 1:length(my.number)){#for each optimal number of trees with tree depth combo
     TrainData<-as.data.frame(TrainData)
-    rf[[i]]<-ranger(mydepvector~.,data=TrainData,num.trees = my.number[i],#build random
+    rf<-ranger(mydepvector~.,data=TrainData,num.trees = my.number[i],#build random
                #forest with all training data, keeping other parameters the same
                replace = TRUE,
-               importance="sobolMDA",
+               importance="permutation",
                min.node.size = my.optimal.depth[i],
                keep.inbag = TRUE)
-    predicted<-predict(rf[[i]],TestData)#predict using random forest and test predictors
+    predicted<-predict(rf,TestData)#predict using random forest and test predictors
     predicted<-as.data.frame(predicted)
     DepTest<-as.data.frame(DepTest)
-    RMSEtest[i]<-sqrt((1/nrow(predicted))*sum((DepTest-predicted)^2))#evaluate using same metric
+    RMSEtest[i]<-sqrt((1/length(predicted[[1]]))*sum((DepTest-predicted[[1]])^2))#evaluate using same metric
+    
+    TrainRF<-TrainData
+    TrainRF$DepVar<-mydepvector
+    rfHO<-holdoutRF(DepVar~.,data=TrainRF,num.trees = my.number[i],
+                    #build a random forest using all train data, with chosen
+                    min.node.size = my.optimal.depth[i],
+                    keep.inbag = TRUE)  
+    
+    predictedHO<-predict(rfHO,TestData)#predict using random forest and test predictors
+    predictedHO<-as.data.frame(predictedHO)
+    RMSEtestHO[i]<-sqrt((1/length(predictedHO[[1]]))*sum((DepTest-predictedHO[[1]])^2))#evaluate using same metric
     
   }
   
-  ImportanceMeasure<-rf[[1]][["variable.importance"]]#extract importance measures from the random forest
+  ImportanceMeasure<-rf[["variable.importance"]]#extract importance measures from the random forest
   ImportanceMeasure<-as.data.frame(ImportanceMeasure)
   ImportanceMeasure<-ImportanceMeasure %>%#sort the variables by descending importance measure
     arrange(desc(as.numeric(ImportanceMeasure)))
@@ -391,19 +516,40 @@ MyMult<-function(IndepMatrix,DepVector){
   ImportanceMeasure<-as.data.frame(ImportanceMeasure)
   ImportanceMeasure$rowname<-factor(ImportanceMeasure$rowname,
                                     levels=unique(ImportanceMeasure$rowname))
+  
+  ImportanceMeasureHO<-rfHO[["variable.importance"]]#extract importance measures from the random forest
+  ImportanceMeasureHO<-as.data.frame(ImportanceMeasureHO)
+  ImportanceMeasureHO<-ImportanceMeasureHO %>%#sort the variables by descending importance measure
+    arrange(desc(as.numeric(ImportanceMeasureHO)))
+  ImportanceMeasureHO<-rownames_to_column(ImportanceMeasureHO)#make a column of variable names
+  ImportanceMeasureHO<-ImportanceMeasureHO[1:15,]#keep only 15 most important variables
+  ImportanceMeasureHO<-as.data.frame(ImportanceMeasureHO)
+  ImportanceMeasureHO$rowname<-factor(ImportanceMeasureHO$rowname,
+                                      levels=unique(ImportanceMeasureHO$rowname))
+  
   #make variable names a factor so that they won't automatically alphabetize when we plot them
   p2<-ggplot(data = ImportanceMeasure,mapping = aes(x=rowname,
                                                     y=ImportanceMeasure))+
     #plot variables by decreasing importance measure
     geom_point(size=6,fill="#de7608",color="#de7608")+#use the theme colors
     expand_limits(y=0)+#force y-axis to start at 0 rather than a positive number
-    labs(x="Variable",y="Importance Index")+#label axes
+    labs(x="Variable",y="permutation")+#label axes
     theme_bw()+#get rid of grey background
     theme(axis.text.x = element_text(angle=90),#rotate variable names vertical
           axis.title.x=element_blank(),#get rid of x-axis title
-          text=element_text(face="bold",color="black",size=rel(5)),#make text black and large
+          text=element_text(face="bold",color="black",size=rel(3)),#make text black and large
           axis.text = element_text(color = "black"))#make text black
-  
+  p2HO<-ggplot(data = ImportanceMeasureHO,mapping = aes(x=rowname,
+                                                        y=ImportanceMeasureHO))+
+    #plot variables by decreasing importance measure
+    geom_point(size=6,fill="#de7608",color="#de7608")+#use the theme colors
+    expand_limits(y=0)+#force y-axis to start at 0 rather than a positive number
+    labs(x="Variable",y="ranger Holdout")+#label axes
+    theme_bw()+#get rid of grey background
+    theme(axis.text.x = element_text(angle=90),#rotate variable names vertical
+          axis.title.x=element_blank(),#get rid of x-axis title
+          text=element_text(face="bold",color="black",size=rel(3)),#make text black and large
+          axis.text = element_text(color = "black"))#make text black
   p3<-ggplot(dfRMSERF,aes(x=my.n,y=my.depth,fill=RMSERF))+
     geom_tile()+
     scale_fill_viridis(discrete = FALSE,name="RMSE")+
@@ -412,11 +558,13 @@ MyMult<-function(IndepMatrix,DepVector){
   
   end.time<-Sys.time()#notes the end time
   time.taken<-round(end.time-start.time,2)#calculates the time taken to 2 decimals
-  MyList<-list(time.taken,rf,RMSEtest,p2,p3,my.number,my.optimal.depth,RMSEtest)
+  MyList<-list(time.taken,rf,RMSEtest,p2,p3,my.number,my.optimal.depth,RMSEtestHO,p2HO)
   #make and return the relavant list of items
   return(MyList)
 }
 
+#IndepMatrix<-DFBoot#these are here for debugging mode
+#DepVector<-FPBoot
 
 
 # #############
@@ -444,7 +592,12 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
   DepTest<-as.data.frame(DepTest)
   colnames(DepTest)<-"DepTest"
   
-  #LOOCV
+  #5-fold cross-validation
+  set.seed(seed4)
+  cvindex=sample(rep(seq(5),length=nrow(TrainData)))#make index for 5-fold cross validation
+  CVTrain<-cbind(TrainData,cvindex)#attach index to matrix of predictors
+  CVDep<-cbind(mydepvector,cvindex)#attach index to vector of outcomes
+  CVDep<-as.data.frame(CVDep)
   DataFrame<-list()#initialize outputs
   Vector<-list()
   my.seq<-seq(0,1,0.2)#make a sequence of alphas to try
@@ -458,6 +611,8 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
   my.length<-length(my.seq3)#calculate how many rows other outputs need
   rfPR<-matrix(nrow=my.length,ncol=length(my.seq4))#initialize outputs
   SDRF<-matrix(nrow=my.length,ncol=length(my.seq4))
+  rfPRHO<-matrix(nrow=my.length,ncol=length(my.seq4))#initialize outputs
+  SDRFHO<-matrix(nrow=my.length,ncol=length(my.seq4))
   my.n<-matrix(nrow=my.length,ncol=length(my.seq4))
   my.depth<-matrix(nrow=my.length,ncol=length(my.seq4))
   my.object<-list()
@@ -465,11 +620,13 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
   for (j in 1:length(my.seq)){#for each value of alpha to try
     for (n in 1:length(my.seq2)){#for each value of lambda to try
       myvector<-list()#temporary variable to hold metrics before averaging
-      for (i in 1:nrow(TrainData)){#for each holdout set
-        DataFrame[[i]]<-TrainData[-i,]#use index to select appropriate subset of predictors
-        Vector[[i]]<-mydepvector[-i]#use index to select appropriate subset of outcomes
-        TestData1<-as.matrix(TrainData[i,])#use index to select appropriate subset of predictors
-        DepTest1<-factor(mydepvector[i], levels=c(0,1))#use index to select appropriate subset of outcomes
+      for (i in 1:5){#for each holdout set
+        DataFrame[[i]]<-CVTrain[CVTrain$cvindex!=i,]#use index to select appropriate subset of predictors
+        Vector[[i]]<-CVDep[CVDep$cvindex!=i,1]#use index to select appropriate subset of outcomes
+        TestData1<-CVTrain[CVTrain$cvindex==i,]#use index to select appropriate subset of predictors
+        TestData1<-as.matrix(TestData1)
+        DepTest1<-CVDep[CVDep$cvindex==i,1]#use index to select appropriate subset of outcomes
+        DepTest1<-as.factor(DepTest1)
         set.seed(seed2)#make sure the foldid is the same every time (modulo the number of rows in the data frame)
         foldid=sample(rep(seq(10),length=nrow(DataFrame[[i]])))#make a foldid to feed into the function call
         my.model<-glmnet(DataFrame[[i]],factor(Vector[[i]]),#build an elastic
@@ -484,9 +641,11 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
                            #the model, test predictors, use the lambda which minimizes MSE
                            family="binomial", type = "response")
         #keep family as binomial, and get the output rather than the class
-        Predicted<-as.data.frame(Predicted)
+        Predicted<-as.numeric(Predicted)
         ADataFramePR<-cbind(DepTest1,Predicted)#make a data frame to feed into pr_auc
         colnames(ADataFramePR)<-c("truth","Class1")#give it the correct column names
+        ADataFramePR <- as.data.frame(ADataFramePR)
+        ADataFramePR$truth <- as.factor(ADataFramePR$truth)
         
         myvector[[i]]<-yardstick::pr_auc(ADataFramePR,truth = "truth","Class1")#calculate area under PR curve
         #and index the metric by the same index
@@ -508,16 +667,19 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
   for (j in 1:length(my.seq3)){#for each option for number of trees
     for (n in 1:length(my.seq4)){#for each possible tree depth
       myvector2<-list()#make temporary variable to hold metrics before averaging
-      for (i in 1:nrow(TrainData)){#for each holdout set
-        DataFrame[[i]]<-TrainData[-i,]#use index to select appropriate subset of predictors
-        Vector[[i]]<-mydepvector[-i]#use index to select appropriate subset of outcomes
-        TestData1<-as.matrix(TrainData[i,])#use index to select appropriate subset of predictors
-        DepTest1<-factor(mydepvector[i],levels=c(0,1))#use index to select appropriate subset of outcomes
+      myvector2HO<-list()#make temporary variable to hold metrics before averaging
+      for (i in 1:5){#for each holdout set
+        DataFrame[[i]]<-CVTrain[CVTrain$cvindex!=i,]#use index to select appropriate subset of predictors
+        Vector[[i]]<-CVDep[CVDep$cvindex!=i,1]#use index to select appropriate subset of outcomes
+        TestData1<-CVTrain[CVTrain$cvindex==i,]#use index to select appropriate subset of predictors
+        TestData1<-as.matrix(TestData1)
+        DepTest1<-CVDep[CVDep$cvindex==i,1]#use index to select appropriate subset of outcomes
+        DepTest1<-as.factor(DepTest1)
         rf<-ranger(Vector[[i]]~.,data=DataFrame[[i]],#make a random forest with
                    #the cross-validation predictors and outcomes
                    num.trees = my.seq3[j],#iterate through number of trees
                    replace = TRUE,#keep other parameters the same as in
-                   importance="sobolMDA",#other models for other outcome variables
+                   importance="permutation",#other models for other outcome variables
                    min.node.size = my.seq4[n],#given tree depth
                    keep.inbag = TRUE,
                    classification = TRUE)#except for classification, as this is the only binary outcome
@@ -527,6 +689,23 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
         colnames(BDataFramePR)<-c("truth","Class1")#give it the necessary column names
         myvector2[[i]]<-yardstick::pr_auc(BDataFramePR,truth="truth","Class1")#calculate the area
         #under the pr curve and save the metric indexed by which loop we are on
+        
+        
+        RFTrainData<-DataFrame[[i]]
+        RFTrainData$DepVar<-Vector[[i]]
+        rfHO<-holdoutRF(DepVar~.,data=RFTrainData,num.trees = my.seq3[j],
+                        #build a random forest using all train data, with chosen
+                        min.node.size = my.seq4[n],
+                        keep.inbag = TRUE,
+                        classification = TRUE) #except for classification, as this is the only binary outcome
+        
+        predictedHO<-predict.holdoutRF(rfHO,TestData1)#predict using the random forest and test predictors
+        predictedHO<-as.data.frame(predictedHO)
+        BDataFramePRHO<-cbind(DepTest1,predictedHO)#make a data frame to calculate the area under the PR curve
+        colnames(BDataFramePRHO)<-c("truth","Class1")#give it the necessary column names
+        myvector2HO[[i]]<-yardstick::pr_auc(BDataFramePRHO,truth="truth","Class1")#calculate the area
+        #under the pr curve and save the metric indexed by which loop we are on
+        
       }
       myPRvector<-matrix(nrow=length(myvector2),ncol=1)#calculate area under PR curve
       for (i in 1:length(myvector2)){
@@ -537,7 +716,17 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
       SDRF[j,n]<-sd(myPRvector)#save the standard deviation with the same index
       my.n[j,n]<-my.seq3[j]#save the number of trees tried indexed same as the metric
       my.depth[j,n]<-my.seq4[n]#save tree depth with same index
+      
+      myPRvectorHO<-matrix(nrow=length(myvector2HO),ncol=1)#calculate area under PR curve
+      for (i in 1:length(myvector2HO)){
+        if (length(myvector2HO[[i]][[".estimate"]])>0){#if there is something in that entry
+          myPRvectorHO[i]=myvector2HO[[i]][[".estimate"]]#separate out the values for the area under the PR curve from the labels
+        }  }
+      rfPRHO[j,n]<-mean(myPRvectorHO)#save the metric with an index
+      SDRFHO[j,n]<-sd(myPRvectorHO)#save the standard deviation with the same index
     }}
+  
+  
   myPR<-c(myPR)
   SD<-c(SD)
   my.alpha<-c(my.alpha)
@@ -556,6 +745,7 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
   my.best.lambda<-my.lambda[as.numeric(my.indices)]#determine which lambda has optimal metric
   
   ConfMat<-list()
+  ConfMatHO<-list()
   my.model<-list()
   for (i in 1:length(my.best.alpha)){#for each top candidate alpha-lambda pair
     TrainData<-as.matrix(TrainData)
@@ -572,11 +762,12 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
                        s="lambda.min",family="binomial",#using the lambda that minimizes the MSE
                        type = "class")#predict the outcome as a class rather than a probability
     Predicted<-as.data.frame(Predicted)
-    Predicted<-as.numeric(Predicted$s1)
+    Predicted<-as.numeric(Predicted$`s=lambda.min`)
     DepTest<-as.numeric(unlist(DepTest))
     #calculate the confusion matrix for the test data and save to be reported out
-    ConfMat[[i]]<-caret::confusionMatrix(factor(Predicted,levels = c(0,1)),
-                                  factor(DepTest,levels = c(0,1)))$table}
+    ConfMat[[i]]<-confusionMatrix(factor(Predicted,levels = c(0,1)),
+                                  factor(DepTest,levels = c(0,1)))$table
+  }
   
   DepTest<-as.matrix(DepTest)
   Metrics<-assess.glmnet(object=my.model[[1]],newx=TestData,#calculate the metrics to assess
@@ -587,26 +778,26 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
   my.coefs<-as.data.frame(my.coefs)
   
   my.coefs<-my.coefs %>%#arranges the coefficients in descending absolute value
-    arrange(desc(abs(my.coefs$s1)))
+    arrange(desc(abs(my.coefs$`s=lambda.min`)))
   my.coefs<-my.coefs[!rownames(my.coefs) %in% "(Intercept)",,drop=FALSE]
   #get rid of the intercept so that we only have the coefficients for the variables
   my.coefs<-my.coefs[1:15,,drop=FALSE]#keep only the top 15 most influential
   my.coefs<-my.coefs %>%#Gets rid of all coefficients that are zero
-    filter(!s1==0)
+    filter(!`s=lambda.min`==0)
   my.coefs<-as.data.frame(my.coefs)
   my.coefs<-my.coefs %>%#do this again because an intermediate step disorganizes them
-    arrange(desc(abs(my.coefs$s1)))
+    arrange(desc(abs(my.coefs$`s=lambda.min`)))
   my.coefs<-rownames_to_column(my.coefs)#make a column with variable names
   my.coefs$rowname<-factor(my.coefs$rowname,levels = unique(my.coefs$rowname))
   #make variable names a factor so that ggplot2 won't automatically alphabetize them
-  p1<-ggplot(my.coefs,aes(x=rowname,y=s1))+#plot the coefficients in decreasing
+  p1<-ggplot(my.coefs,aes(x=rowname,y=`s=lambda.min`))+#plot the coefficients in decreasing
     #absolute value with variable name on x-axis
     geom_point(colour="#3c78d8",size=6)+#keep to our color pallet
     labs(x="Variable",y="Coefficient")+#make axis labels
     theme_bw()+#get rid of grey
     theme(axis.text.x = element_text(angle=90),#rotate variable names to vertical
           axis.title.x=element_blank(),#get rid of x-axis title
-          text=element_text(face="bold",color="black",size=rel(5)),#make text black and large
+          text=element_text(face="bold",color="black",size=rel(3)),#make text black and large
           axis.text = element_text(color = "black"))#make text black
   
   #Now we have finished the post-loop part for the elastic net regression
@@ -624,27 +815,55 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
   
   my.number<-my.n[as.numeric(my.indices)]#determine which number of trees optimizes our metric
   my.optimal.depth<-my.depth[as.numeric(my.indices)]#determine which tree depth optimizes our metric
+  
+  rfPRHO<-c(rfPRHO)#transform output from matrix to vector
+  SDRFHO<-c(SDRFHO)
+  rfPRHO<-as.data.frame(rfPRHO)
+  df2HO<-cbind(rfPRHO,SDRFHO,my.n,my.depth)
+  rfPRHO<-rownames_to_column(rfPRHO)
+  rfPRHO<-rfPRHO %>%
+    arrange(desc(rfPRHO))#make sure to arrange in descending order so can maximize
+  my.indicesHO<-rfPRHO$rowname[1:5]
+  
   ConfMat2<-list()
-  rf<-list()
+  ConfMat2HO<-list()
   for (i in 1:length(my.number)){#for each combination of parameters chosen
     TrainData<-as.data.frame(TrainData)
-    rf[[i]]<-ranger(mydepvector~.,data=TrainData,num.trees = my.number[i],
+    rf<-ranger(mydepvector~.,data=TrainData,num.trees = my.number[i],
                #build a random forest using all the training data with optimal 
                replace = TRUE,#number of trees
-               importance="sobolMDA",#keeping other parameters the same
+               importance="permutation",#keeping other parameters the same
                min.node.size = my.optimal.depth[i],#as for other outcome variables
                keep.inbag = TRUE,
                classification=TRUE)#except for this, which is different because this outcome is binary
-    predicted<-predict(rf[[i]],TestData)#predict outcomes using test predictors
+    predicted<-predict(rf,TestData)#predict outcomes using test predictors
     predicted<-as.data.frame(predicted)
     DepTest<-as.data.frame(DepTest)
     Pred<-predicted#get prediction vector from random forest
     Pred<-unlist(Pred)#make into a factor
     DepTestFactor<-unlist(DepTest)#get the ground truth vector
-    ConfMat2[[i]]<-caret::confusionMatrix(Pred,#Calculate the confusion matrix for the random forest
-                                   factor(DepTestFactor,levels = c(0,1)))$table}
+    ConfMat2[[i]]<-confusionMatrix(Pred,#Calculate the confusion matrix for the random forest
+                                   factor(DepTestFactor,levels = c(0,1)))$table
+    
+    TrainRF<-TrainData
+    TrainRF$DepVar<-mydepvector
+    rfHO<-holdoutRF(DepVar~.,data=TrainRF,num.trees = my.number[i],
+                    #build a random forest using all train data, with chosen
+                    min.node.size = my.optimal.depth[i],
+                    keep.inbag = TRUE,
+                    classification = TRUE)#except for this, which is different because this outcome is binary
+    
+    predictedHO<-predict(rfHO,TestData)#predict outcomes using test predictors
+    predictedHO<-as.data.frame(predictedHO)
+    PredHO<-predictedHO#get prediction vector from random forest
+    PredHO<-unlist(PredHO)#make into a factor
+    DepTestFactorHO<-unlist(DepTest)#get the ground truth vector
+    ConfMat2HO[[i]]<-confusionMatrix(PredHO,#Calculate the confusion matrix for the random forest
+                                     factor(DepTestFactorHO,levels = c(0,1)))$table
+  }
   
-  ImportanceMeasure<-rf[[1]][["variable.importance"]]#extract importance measures
+  
+  ImportanceMeasure<-rf[["variable.importance"]]#extract importance measures
   ImportanceMeasure<-as.data.frame(ImportanceMeasure)
   ImportanceMeasure<-ImportanceMeasure %>%#arranges variables by descending importance measure
     arrange(desc(as.numeric(ImportanceMeasure)))
@@ -655,17 +874,43 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
   ImportanceMeasure<-as.data.frame(ImportanceMeasure)
   ImportanceMeasure$rowname<-factor(ImportanceMeasure$rowname,
                                     levels=unique(ImportanceMeasure$rowname))
+  
+  ImportanceMeasureHO<-rfHO[["variable.importance"]]#extract importance measures
+  ImportanceMeasureHO<-as.data.frame(ImportanceMeasureHO)
+  ImportanceMeasureHO<-ImportanceMeasureHO %>%#arranges variables by descending importance measure
+    arrange(desc(as.numeric(ImportanceMeasureHO)))
+  ImportanceMeasureHO<-ImportanceMeasureHO %>%
+    filter(ImportanceMeasureHO>0)#eliminates negative values of importance measure
+  ImportanceMeasureHO<-rownames_to_column(ImportanceMeasureHO)#converts variable names to a column
+  ImportanceMeasureHO<-ImportanceMeasureHO[1:15,]#keeps only 15 most important variables
+  ImportanceMeasureHO<-as.data.frame(ImportanceMeasureHO)
+  ImportanceMeasureHO$rowname<-factor(ImportanceMeasureHO$rowname,
+                                      levels=unique(ImportanceMeasureHO$rowname))
+  
   #makes variable names a factor so that they won't be automatically alphabetized
   p2<-ggplot(data = ImportanceMeasure,mapping = aes(x=rowname,
                                                     y=ImportanceMeasure))+
     #plots variable names by decreasing importance measure
     geom_point(size=6,fill="#de7608",color="#de7608")+#use theme colors and make dots large
     expand_limits(y=0)+#force y-axis to start at 0
-    labs(x="Variable",y="Importance Index")+#label axes
+    labs(x="Variable",y="permutation")+#label axes
     theme_bw()+#get rid of grey background
     theme(axis.text.x = element_text(angle=90),#rotate variable names to vertical
           axis.title.x=element_blank(),#get rid of x-axis label
-          text=element_text(face="bold",color="black",size=rel(5)),#make text black and large
+          text=element_text(face="bold",color="black",size=rel(3)),#make text black and large
+          axis.text = element_text(color = "black"))#make text black
+  
+  #makes variable names a factor so that they won't be automatically alphabetized
+  p2HO<-ggplot(data = ImportanceMeasureHO,mapping = aes(x=rowname,
+                                                        y=ImportanceMeasureHO))+
+    #plots variable names by decreasing importance measure
+    geom_point(size=6,fill="#de7608",color="#de7608")+#use theme colors and make dots large
+    expand_limits(y=0)+#force y-axis to start at 0
+    labs(x="Variable",y="ranger Holdout")+#label axes
+    theme_bw()+#get rid of grey background
+    theme(axis.text.x = element_text(angle=90),#rotate variable names to vertical
+          axis.title.x=element_blank(),#get rid of x-axis label
+          text=element_text(face="bold",color="black",size=rel(3)),#make text black and large
           axis.text = element_text(color = "black"))#make text black
   p3<-ggplot(df1,aes(x=my.alpha,y=log(my.lambda),fill = myPR))+
     geom_tile()+
@@ -684,7 +929,11 @@ MyBin<-function(IndepMatrix,DepVector){#This function takes as inputs
   end.time<-Sys.time()#notes the end time
   time.taken<-round(end.time-start.time,2)#calculates the time taken to 2 decimals
   MyList<-list(my.model[[1]],my.best.alpha,my.best.lambda,Metrics,p1,
-               time.taken,ConfMat,rf,p2,predicted,ConfMat2,p3,p4)
+               time.taken,ConfMat,rf,p2,predicted,Predicted,ConfMat2,p3,p4,p2HO,ConfMat2HO,predictedHO)
   #makes a list of things to be returned by the function
   return(MyList)
 }
+
+
+
+
